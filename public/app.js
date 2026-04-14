@@ -1,5 +1,6 @@
 /**
  * Port Monitor Dashboard - Client-side Application
+ * Multi-server support with Agent mode
  */
 (function () {
   'use strict';
@@ -11,6 +12,8 @@
   let sortConfig = { key: 'localPort', dir: 'asc' };
   let ws = null;
   let reconnectTimer = null;
+  let currentServerId = 'local';
+  let serverList = [];
 
   // ── DOM Elements ────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
@@ -36,6 +39,8 @@
   const elSearchInput = $('#searchInput');
   const elStateFilter = $('#stateFilter');
   const elProtoFilter = $('#protoFilter');
+  const elServerChips = $('#serverChips');
+  const elServerCount = $('#serverCount');
 
   // ── Color Map ───────────────────────────────────
   const stateColors = {
@@ -62,6 +67,18 @@
     if (state === 'CLOSE_WAIT') return 'close_wait';
     if (state.includes('FIN_WAIT')) return 'fin_wait';
     return 'other';
+  }
+
+  // ── Platform Icons ──────────────────────────────
+  const platformIcons = {
+    'win32': '🪟',
+    'linux': '🐧',
+    'darwin': '🍎',
+    'freebsd': '😈',
+  };
+
+  function getPlatformIcon(platform) {
+    return platformIcons[platform] || '🖥️';
   }
 
   // ── Well-known Port Icons ─────────────────────
@@ -111,30 +128,27 @@
 
   // ── Process Icons ────────────────────────────
   const processIcons = {
-    'node.exe': '🟢',
-    'python.exe': '🐍',
-    'python3.exe': '🐍',
-    'pythonw.exe': '🐍',
-    'java.exe': '☕',
-    'javaw.exe': '☕',
-    'nginx.exe': '🌐',
-    'httpd.exe': '🌐',
-    'apache.exe': '🌐',
-    'mysqld.exe': '🐬',
-    'postgres.exe': '🐘',
-    'redis-server.exe': '⚡',
-    'mongod.exe': '🍃',
+    'node.exe': '🟢', 'node': '🟢',
+    'python.exe': '🐍', 'python': '🐍', 'python3': '🐍', 'python3.exe': '🐍', 'pythonw.exe': '🐍',
+    'java.exe': '☕', 'java': '☕', 'javaw.exe': '☕',
+    'nginx.exe': '🌐', 'nginx': '🌐',
+    'httpd.exe': '🌐', 'httpd': '🌐', 'apache': '🌐', 'apache2': '🌐',
+    'mysqld.exe': '🐬', 'mysqld': '🐬',
+    'postgres.exe': '🐘', 'postgres': '🐘', 'postgresql': '🐘',
+    'redis-server.exe': '⚡', 'redis-server': '⚡',
+    'mongod.exe': '🍃', 'mongod': '🍃',
     'svchost.exe': '⚙️',
     'system': '💻',
     'msedge.exe': '🌊',
-    'chrome.exe': '🟡',
-    'firefox.exe': '🦊',
+    'chrome.exe': '🟡', 'chrome': '🟡',
+    'firefox.exe': '🦊', 'firefox': '🦊',
     'code.exe': '💜',
     'explorer.exe': '📁',
     'wsl.exe': '🐧',
-    'docker.exe': '🐳',
+    'docker.exe': '🐳', 'docker': '🐳', 'dockerd': '🐳',
     'powershell.exe': '💠',
     'cmd.exe': '⬛',
+    'sshd': '🔐', 'ssh.exe': '🔐',
     'qq.exe': '🐧',
     'wechat.exe': '💬',
     'telegram.exe': '✈️',
@@ -142,7 +156,6 @@
     'spotify.exe': '🎵',
     'steam.exe': '🎮',
     'git.exe': '📋',
-    'ssh.exe': '🔐',
     'curl.exe': '🔄',
     'windowsterminal.exe': '🖥️',
     'searchhost.exe': '🔍',
@@ -188,12 +201,101 @@
 
     ws.onmessage = (event) => {
       try {
-        currentData = JSON.parse(event.data);
-        render(currentData);
+        const data = JSON.parse(event.data);
+
+        // Handle server list updates
+        if (data.type === 'server_list_update') {
+          serverList = data.serverList;
+          renderServerChips();
+          return;
+        }
+
+        // Handle no-data state for agent
+        if (data.noData) {
+          if (data.serverList) {
+            serverList = data.serverList;
+            renderServerChips();
+          }
+          showNoDataState(data.serverName || data.serverId);
+          return;
+        }
+
+        // Normal data
+        if (data.serverList) {
+          serverList = data.serverList;
+          renderServerChips();
+        }
+
+        currentData = data;
+        render(data);
       } catch (e) {
         console.error('Parse error:', e);
       }
     };
+  }
+
+  function switchServer(serverId) {
+    if (serverId === currentServerId) return;
+    currentServerId = serverId;
+    selectedPort = null;
+    elPortDetailSection.style.display = 'none';
+
+    // Update chip active state
+    elServerChips.querySelectorAll('.server-chip').forEach(chip => {
+      chip.classList.toggle('active', chip.dataset.serverId === serverId);
+    });
+
+    // Tell server to switch
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'select_server', serverId }));
+    }
+
+    // Show loading
+    elPortGrid.innerHTML = `
+      <div class="loading-placeholder">
+        <div class="spinner"></div>
+        <p>正在加载服务器数据...</p>
+      </div>`;
+  }
+
+  function showNoDataState(serverName) {
+    elHostname.textContent = serverName;
+    elPortGrid.innerHTML = `
+      <div class="loading-placeholder">
+        <div class="spinner"></div>
+        <p>等待 Agent 发送数据...</p>
+      </div>`;
+  }
+
+  // ── Render Server Chips ─────────────────────────
+  function renderServerChips() {
+    const html = serverList.map(s => {
+      const isActive = s.id === currentServerId;
+      const icon = getPlatformIcon(s.platform);
+      const statusClass = s.status === 'online' ? 'online' : 'offline';
+
+      return `
+        <button class="server-chip ${isActive ? 'active' : ''}"
+                data-server-id="${s.id}"
+                title="${s.name} (${s.platform}/${s.arch})">
+          <span class="server-chip-dot ${statusClass}"></span>
+          <span class="server-chip-icon">${icon}</span>
+          <span class="server-chip-name">${s.name}</span>
+        </button>`;
+    }).join('');
+
+    elServerChips.innerHTML = html;
+
+    // Attach click handlers
+    elServerChips.querySelectorAll('.server-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        switchServer(chip.dataset.serverId);
+      });
+    });
+
+    // Update count
+    const onlineCount = serverList.filter(s => s.status === 'online').length;
+    elServerCount.textContent = `${onlineCount} / ${serverList.length} 在线`;
   }
 
   // ── Render ──────────────────────────────────────
@@ -241,11 +343,12 @@
     const hours = Math.floor(info.uptime / 3600);
     const minutes = Math.floor((info.uptime % 3600) / 60);
 
-    elHostname.textContent = info.hostname;
+    const serverName = currentData?.serverName || info.hostname;
+    elHostname.textContent = serverName;
 
     elSysInfo.innerHTML = `
       <div class="sys-row"><span class="label">主机名</span><span class="value">${info.hostname}</span></div>
-      <div class="sys-row"><span class="label">系统</span><span class="value">${info.platform} / ${info.arch}</span></div>
+      <div class="sys-row"><span class="label">系统</span><span class="value">${getPlatformIcon(info.platform)} ${info.platform} / ${info.arch}</span></div>
       <div class="sys-row"><span class="label">CPU 核心</span><span class="value">${info.cpus}</span></div>
       <div class="sys-row">
         <span class="label">内存使用</span>
@@ -551,7 +654,6 @@
   // Refresh
   $('#btnRefresh').addEventListener('click', () => {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      // Force a refresh by reconnecting
       ws.close();
       setTimeout(connect, 100);
     }

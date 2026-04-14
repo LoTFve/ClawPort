@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ClawPort - 端口可视化监控</title>
-  <meta name="description" content="ClawPort - 实时端口监控仪表盘，可视化展示系统所有网络连接和端口状态" />
+  <title>ClawPort - 多服务器端口可视化监控</title>
+  <meta name="description" content="ClawPort - 多服务器实时端口监控仪表盘，可视化展示系统所有网络连接和端口状态" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -61,6 +61,28 @@
         </div>
       </div>
     </header>
+
+    <!-- Server Selector Bar -->
+    <section class="server-bar" id="serverBar">
+      <div class="server-bar-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+          <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+          <line x1="6" y1="6" x2="6.01" y2="6"/>
+          <line x1="6" y1="18" x2="6.01" y2="18"/>
+        </svg>
+        <span>服务器</span>
+      </div>
+      <div class="server-chips" id="serverChips">
+        <button class="server-chip active" data-server-id="local">
+          <span class="server-chip-dot online"></span>
+          <span class="server-chip-name">本机</span>
+        </button>
+      </div>
+      <div class="server-bar-info">
+        <span class="server-count" id="serverCount">1 台服务器</span>
+      </div>
+    </section>
 
     <!-- Stats Cards -->
     <section class="stats-grid" id="statsGrid">
