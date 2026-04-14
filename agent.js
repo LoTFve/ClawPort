@@ -18,14 +18,37 @@
 const WebSocket = require('ws');
 const { exec } = require('child_process');
 const os = require('os');
+const fs = require('fs');
+const path = require('path');
+const yaml = require('js-yaml');
 
 // ── Configuration ─────────────────────────────────
+let yamlConfig = {};
+try {
+  const configPath = path.join(__dirname, 'agent_config.yml');
+  if (fs.existsSync(configPath)) {
+    yamlConfig = yaml.load(fs.readFileSync(configPath, 'utf8')) || {};
+    console.log(`  📁 Configuration loaded from agent_config.yml`);
+  } else {
+    console.warn(`  ⚠️  agent_config.yml not found, relying on environment variables`);
+  }
+} catch (e) {
+  console.error('  ❌ Critical: Failed to load agent_config.yml:', e.message);
+  process.exit(1);
+}
+
 const CONFIG = {
-  masterUrl: process.env.MASTER_URL || 'ws://localhost:3456',
-  agentId: process.env.AGENT_ID || os.hostname(),
-  agentName: process.env.AGENT_NAME || os.hostname(),
-  refreshInterval: parseInt(process.env.REFRESH_INTERVAL) || 10000,
+  masterUrl: process.env.MASTER_URL || yamlConfig.master_url,
+  agentId: process.env.AGENT_ID || yamlConfig.agent_id || os.hostname(),
+  agentName: process.env.AGENT_NAME || yamlConfig.agent_name || os.hostname(),
+  refreshInterval: parseInt(process.env.REFRESH_INTERVAL || yamlConfig.refresh_interval),
+  reconnectInterval: parseInt(process.env.RECONNECT_INTERVAL || yamlConfig.reconnect_interval),
 };
+
+if (!CONFIG.masterUrl || !CONFIG.refreshInterval || !CONFIG.reconnectInterval) {
+  console.error('  ❌ Error: Critical parameters (master_url, refresh_interval, reconnect_interval) missing in config or env');
+  process.exit(1);
+}
 
 const isWindows = os.platform() === 'win32';
 let ws = null;
@@ -420,11 +443,11 @@ function cleanup() {
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
-  console.log(`  🔄 Reconnecting in 5 seconds...`);
+  console.log(`  🔄 Reconnecting in ${CONFIG.reconnectInterval / 1000} seconds...`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
-  }, 5000);
+  }, CONFIG.reconnectInterval);
 }
 
 // ── Start ─────────────────────────────────────────

@@ -7,6 +7,7 @@ const os = require('os');
 const url = require('url');
 const { Client } = require('ssh2');
 const fs = require('fs');
+const yaml = require('js-yaml');
 
 const app = express();
 const server = http.createServer(app);
@@ -15,27 +16,37 @@ const server = http.createServer(app);
 const wssBrowser = new WebSocket.Server({ noServer: true });
 const wssAgent = new WebSocket.Server({ noServer: true });
 
-const PORT = process.env.PORT || 3456;
+// ── Load Config from YAML ────────────────────────
+let yamlConfig = {};
+try {
+  const configPath = path.join(__dirname, 'config.yml');
+  if (fs.existsSync(configPath)) {
+    yamlConfig = yaml.load(fs.readFileSync(configPath, 'utf8')) || {};
+    console.log(`  📁 Configuration loaded from config.yml`);
+  } else {
+    console.warn(`  ⚠️  config.yml not found, relying on environment variables`);
+  }
+} catch (e) {
+  console.error('  ❌ Critical: Failed to load config.yml:', e.message);
+  process.exit(1);
+}
+
+const CONFIG = {
+  port: process.env.PORT || yamlConfig.dashboard?.port,
+  ssh_polling_interval: yamlConfig.dashboard?.ssh_polling_interval,
+  default_refresh_ms: yamlConfig.dashboard?.default_refresh_ms
+};
+
+let SSH_SERVERS = yamlConfig.ssh_servers || [];
+
+if (!CONFIG.port) {
+  console.error('  ❌ Error: Port not specified (no PORT env or dashboard.port in config.yml)');
+  process.exit(1);
+}
+
+const PORT = CONFIG.port;
 
 app.use(express.static(path.join(__dirname, 'public')));
-
-// ── Agent Data Store ─────────────────────────────
-const agents = new Map(); // agentId -> { ws, name, platform, arch, hostname, data, lastSeen, type: 'ws'|'ssh' }
-
-// ── SSH Server Configurations ──────────────────────
-// You can add your SSH servers here
-const SSH_SERVERS = [
-  /*
-  {
-    id: 'my-remote-vps',
-    name: 'My Remote VPS',
-    host: 'your.remote.ip',
-    port: 22,
-    username: 'root',
-    privateKeyPath: path.join(os.homedir(), '.ssh', 'id_rsa') // Default path
-  }
-  */
-];
 
 // Track which server each browser client is viewing
 const browserClients = new Map(); // ws -> { selectedServer, intervalTimer, refreshMs }
@@ -211,7 +222,7 @@ function getPortInfo() {
 function parseLinuxSS(output) {
   const connections = [];
   const lines = output.split('\n');
-  
+
   // Format we expect from: ss -ntup -H
   // Example: tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))
   for (const line of lines) {
@@ -317,7 +328,7 @@ async function collectSSHData(config) {
           conn.end();
           const connections = parseLinuxSS(stdout);
           const processed = processRawLinuxData(connections);
-          
+
           resolve({
             timestamp: new Date().toISOString(),
             systemInfo: {
@@ -331,8 +342,8 @@ async function collectSSHData(config) {
               listeningPorts: processed.ports.filter(p => p.states['LISTEN'] || p.states['UDP']).length,
               establishedConnections: connections.filter(c => c.state === 'ESTAB').length
             },
-            ports: processed.ports.sort((a,b) => a.port - b.port),
-            connections: connections.sort((a,b) => a.localPort - b.localPort)
+            ports: processed.ports.sort((a, b) => a.port - b.port),
+            connections: connections.sort((a, b) => a.localPort - b.localPort)
           });
         });
       });
@@ -340,7 +351,7 @@ async function collectSSHData(config) {
       reject(err);
     }).connect({
       host: config.host,
-      port: config.port || 22,
+      port: config.port,
       username: config.username,
       privateKey: fs.readFileSync(config.privateKeyPath)
     });
@@ -382,8 +393,8 @@ function broadcastDataToViewers(serverId, data) {
   }
 }
 
-// Poll SSH every 15 seconds
-setInterval(pollSSHServers, 15000);
+// Poll SSH servers
+setInterval(pollSSHServers, CONFIG.ssh_polling_interval);
 
 // ── REST API ──────────────────────────────────────
 app.get('/api/ports', async (req, res) => {
@@ -511,7 +522,7 @@ wssBrowser.on('connection', (ws) => {
   const clientState = {
     selectedServer: 'local',
     intervalTimer: null,
-    refreshMs: 10000
+    refreshMs: CONFIG.default_refresh_ms
   };
   browserClients.set(ws, clientState);
 
@@ -586,7 +597,7 @@ wssBrowser.on('connection', (ws) => {
         startInterval();
         console.log(`  ⏱️  Browser refresh interval: ${clientState.refreshMs / 1000}s`);
       }
-    } catch (e) {}
+    } catch (e) { }
   });
 
   ws.on('close', () => {
@@ -605,7 +616,7 @@ wssBrowser.on('connection', (ws) => {
 server.listen(PORT, () => {
   const nets = os.networkInterfaces();
   let localIP = 'localhost';
-  
+
   for (const name of Object.keys(nets)) {
     for (const net of nets[name]) {
       // Skip over non-IPv4 and internal (i.e. 127.0.0.1) addresses
