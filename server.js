@@ -5,6 +5,8 @@ const { exec } = require('child_process');
 const path = require('path');
 const os = require('os');
 const url = require('url');
+const { Client } = require('ssh2');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -18,7 +20,22 @@ const PORT = process.env.PORT || 3456;
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Agent Data Store ─────────────────────────────
-const agents = new Map(); // agentId -> { ws, name, platform, arch, hostname, data, lastSeen }
+const agents = new Map(); // agentId -> { ws, name, platform, arch, hostname, data, lastSeen, type: 'ws'|'ssh' }
+
+// ── SSH Server Configurations ──────────────────────
+// You can add your SSH servers here
+const SSH_SERVERS = [
+  /*
+  {
+    id: 'my-remote-vps',
+    name: 'My Remote VPS',
+    host: 'your.remote.ip',
+    port: 22,
+    username: 'root',
+    privateKeyPath: path.join(os.homedir(), '.ssh', 'id_rsa') // Default path
+  }
+  */
+];
 
 // Track which server each browser client is viewing
 const browserClients = new Map(); // ws -> { selectedServer, intervalTimer, refreshMs }
@@ -189,6 +206,185 @@ function getPortInfo() {
   });
 }
 
+// ── SSH & Linux Data Parsing ──────────────────────
+
+function parseLinuxSS(output) {
+  const connections = [];
+  const lines = output.split('\n');
+  
+  // Format we expect from: ss -ntup -H
+  // Example: tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const parts = trimmed.split(/\s+/);
+    if (parts.length < 5) continue;
+
+    const proto = parts[0].toUpperCase();
+    const state = parts[1].toUpperCase();
+    const local = parts[4];
+    const remote = parts[5] || '';
+    const userPart = parts[6] || '';
+
+    const lastColon = local.lastIndexOf(':');
+    if (lastColon === -1) continue;
+
+    const localIP = local.substring(0, lastColon);
+    const localPort = parseInt(localAddress = local.substring(lastColon + 1));
+
+    let remoteIP = '';
+    let remotePort = '';
+    if (remote && remote !== '*:*') {
+      const rLastColon = remote.lastIndexOf(':');
+      if (rLastColon !== -1) {
+        remoteIP = remote.substring(0, rLastColon);
+        remotePort = remote.substring(rLastColon + 1);
+      }
+    }
+
+    // Parse process name and PID: users:(("sshd",pid=123,fd=3))
+    let processName = 'N/A';
+    let pid = 'N/A';
+    const processMatch = userPart.match(/users:\(\("([^"]+)",pid=(\d+)/);
+    if (processMatch) {
+      processName = processMatch[1];
+      pid = processMatch[2];
+    }
+
+    connections.push({
+      proto,
+      localIP: localIP === '0.0.0.0' || localIP === '::' ? '*' : localIP,
+      localPort,
+      remoteIP,
+      remotePort,
+      state: state === 'UNCONN' ? 'UDP' : state,
+      pid,
+      processName
+    });
+  }
+  return connections;
+}
+
+function processRawLinuxData(connections) {
+  const portMap = {};
+  for (const conn of connections) {
+    const key = conn.localPort;
+    if (!portMap[key]) {
+      portMap[key] = {
+        port: conn.localPort,
+        proto: conn.proto,
+        states: {},
+        connections: 0,
+        processes: new Set(),
+        pids: new Set(),
+        localIPs: new Set()
+      };
+    }
+    portMap[key].connections++;
+    portMap[key].states[conn.state] = (portMap[key].states[conn.state] || 0) + 1;
+    if (conn.processName !== 'N/A') portMap[key].processes.add(conn.processName);
+    if (conn.pid !== 'N/A') portMap[key].pids.add(conn.pid);
+    portMap[key].localIPs.add(conn.localIP);
+    if (conn.proto && !portMap[key].proto.includes(conn.proto)) {
+      portMap[key].proto += '/' + conn.proto;
+    }
+  }
+
+  const ports = Object.values(portMap).map(p => ({
+    ...p,
+    processes: [...p.processes],
+    pids: [...p.pids],
+    localIPs: [...p.localIPs]
+  }));
+
+  return { ports, connections };
+}
+
+async function collectSSHData(config) {
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    conn.on('ready', () => {
+      // We run ss with -ntp (TCP), -nup (UDP), -l (Listening), -H (No header)
+      // Usually requires sudo to see process names for all users
+      // However, we'll try without first, or user can prefix with sudo if they want
+      const cmd = 'ss -ntup -l -H';
+      conn.exec(cmd, (err, stream) => {
+        if (err) { conn.end(); reject(err); return; }
+        let stdout = '';
+        stream.on('data', (data) => { stdout += data; });
+        stream.on('close', () => {
+          conn.end();
+          const connections = parseLinuxSS(stdout);
+          const processed = processRawLinuxData(connections);
+          
+          resolve({
+            timestamp: new Date().toISOString(),
+            systemInfo: {
+              hostname: config.host,
+              platform: 'linux',
+              arch: 'x64' // Assume
+            },
+            summary: {
+              totalPorts: processed.ports.length,
+              totalConnections: connections.length,
+              listeningPorts: processed.ports.filter(p => p.states['LISTEN'] || p.states['UDP']).length,
+              establishedConnections: connections.filter(c => c.state === 'ESTAB').length
+            },
+            ports: processed.ports.sort((a,b) => a.port - b.port),
+            connections: connections.sort((a,b) => a.localPort - b.localPort)
+          });
+        });
+      });
+    }).on('error', (err) => {
+      reject(err);
+    }).connect({
+      host: config.host,
+      port: config.port || 22,
+      username: config.username,
+      privateKey: fs.readFileSync(config.privateKeyPath)
+    });
+  });
+}
+
+function pollSSHServers() {
+  for (const config of SSH_SERVERS) {
+    collectSSHData(config)
+      .then(data => {
+        agents.set(config.id, {
+          name: config.name,
+          platform: 'linux',
+          arch: 'x64',
+          data,
+          lastSeen: Date.now(),
+          type: 'ssh'
+        });
+        // Notify browser clients
+        broadcastDataToViewers(config.id, data);
+      })
+      .catch(err => {
+        console.error(`[SSH] Failed to collect from ${config.name}:`, err.message);
+      });
+  }
+}
+
+function broadcastDataToViewers(serverId, data) {
+  for (const [clientWs, clientState] of browserClients) {
+    if (clientState.selectedServer === serverId && clientWs.readyState === WebSocket.OPEN) {
+      const payload = {
+        ...data,
+        serverId,
+        serverName: agents.get(serverId).name,
+        serverList: getServerList()
+      };
+      clientWs.send(JSON.stringify(payload));
+    }
+  }
+}
+
+// Poll SSH every 15 seconds
+setInterval(pollSSHServers, 15000);
+
 // ── REST API ──────────────────────────────────────
 app.get('/api/ports', async (req, res) => {
   try {
@@ -214,12 +410,14 @@ function getServerList() {
   }];
 
   for (const [id, agent] of agents) {
+    const isOnline = agent.type === 'ssh' ? true : (agent.ws && agent.ws.readyState === WebSocket.OPEN);
     list.push({
       id,
       name: agent.name,
       platform: agent.platform,
       arch: agent.arch,
-      status: agent.ws.readyState === WebSocket.OPEN ? 'online' : 'offline',
+      type: agent.type, // 'ws' or 'ssh'
+      status: isOnline ? 'online' : 'offline',
       lastSeen: agent.lastSeen
     });
   }
@@ -257,7 +455,8 @@ wssAgent.on('connection', (ws) => {
           arch: parsed.arch,
           hostname: parsed.hostname,
           data: null,
-          lastSeen: Date.now()
+          lastSeen: Date.now(),
+          type: 'ws'
         });
         console.log(`  🔗 Agent connected: ${parsed.agentName} (${agentId})`);
         broadcastServerList();
@@ -404,11 +603,25 @@ wssBrowser.on('connection', (ws) => {
 
 // ── Start Server ──────────────────────────────────
 server.listen(PORT, () => {
+  const nets = os.networkInterfaces();
+  let localIP = 'localhost';
+  
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      // Skip over non-IPv4 and internal (i.e. 127.0.0.1) addresses
+      if (net.family === 'IPv4' && !net.internal) {
+        localIP = net.address;
+        break;
+      }
+    }
+    if (localIP !== 'localhost') break;
+  }
+
   console.log(`\n  🦀 ClawPort Dashboard (Multi-Server)`);
   console.log(`  ──────────────────────────`);
-  console.log(`  🌐 Dashboard: http://localhost:${PORT}`);
-  console.log(`  📡 Agent WS:  ws://localhost:${PORT}/agent`);
+  console.log(`  🌐 Dashboard: http://${localIP}:${PORT}`);
+  console.log(`  📡 Agent WS:  ws://${localIP}:${PORT}/agent`);
   console.log(`  ⏱️  Refresh:   every 10 seconds`);
   console.log(`  💡 Deploy agent.js on remote servers:\n`);
-  console.log(`     MASTER_URL=ws://<this-ip>:${PORT} node agent.js\n`);
+  console.log(`     MASTER_URL=ws://${localIP}:${PORT}/agent node agent.js\n`);
 });
