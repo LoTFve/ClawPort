@@ -335,9 +335,14 @@ function getPortInfo() {
         cpus: os.cpus().length,
         totalMem: os.totalmem(),
         freeMem: os.freemem(),
+        loadAvg: os.loadavg(), // Added hardware load info
         uptime: os.uptime(),
         networkInterfaces: Object.entries(os.networkInterfaces()).reduce((acc, [name, infos]) => {
-          acc[name] = infos.filter(i => !i.internal).map(i => ({ address: i.address, family: i.family }));
+          acc[name] = infos.filter(i => !i.internal).map(i => ({ 
+            address: i.address, 
+            family: i.family,
+            mac: i.mac
+          }));
           return acc;
         }, {})
       };

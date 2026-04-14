@@ -16,6 +16,9 @@ const server = http.createServer(app);
 const wssBrowser = new WebSocket.Server({ noServer: true });
 const wssAgent = new WebSocket.Server({ noServer: true });
 
+// Track connected agents and collected data
+const agents = new Map(); // id -> { ws, name, platform, arch, hostname, data, lastSeen, type }
+
 // ── Load Config from YAML ────────────────────────
 let yamlConfig = {};
 try {
@@ -68,6 +71,33 @@ server.on('upgrade', (request, socket, head) => {
 
 // ── Local Port Data Collection (same as before) ──
 
+// ── State Normalization ───────────────────────────
+function normalizeState(state) {
+  const map = {
+    'LISTEN': 'LISTENING',
+    'LISTENING': 'LISTENING',
+    'ESTAB': 'ESTABLISHED',
+    'ESTABLISHED': 'ESTABLISHED',
+    'TIME-WAIT': 'TIME_WAIT',
+    'TIME_WAIT': 'TIME_WAIT',
+    'CLOSE-WAIT': 'CLOSE_WAIT',
+    'CLOSE_WAIT': 'CLOSE_WAIT',
+    'FIN-WAIT-1': 'FIN_WAIT_1',
+    'FIN_WAIT_1': 'FIN_WAIT_1',
+    'FIN-WAIT-2': 'FIN_WAIT_2',
+    'FIN_WAIT_2': 'FIN_WAIT_2',
+    'SYN-SENT': 'SYN_SENT',
+    'SYN_SENT': 'SYN_SENT',
+    'SYN-RECV': 'SYN_RECEIVED',
+    'SYN_RECEIVED': 'SYN_RECEIVED',
+    'LAST-ACK': 'LAST_ACK',
+    'LAST_ACK': 'LAST_ACK',
+    'CLOSING': 'CLOSING',
+    'UNCONN': 'N/A',
+  };
+  return map[state] || state || 'N/A';
+}
+
 function parseNetstatWindows(output) {
   const lines = output.split('\n');
   const connections = [];
@@ -113,7 +143,7 @@ function parseNetstatWindows(output) {
       localPort,
       remoteIP,
       remotePort,
-      state: state || 'N/A',
+      state: normalizeState(state),
       pid: pid || 'N/A'
     });
   }
@@ -144,15 +174,24 @@ function getProcessNames(pids) {
 
 function getPortInfo() {
   return new Promise((resolve, reject) => {
-    exec('netstat -ano', { encoding: 'utf8', maxBuffer: 1024 * 1024 * 10 }, async (err, stdout) => {
+    const isWin = os.platform() === 'win32';
+    const cmd = isWin 
+      ? 'netstat -ano' 
+      : 'ss -ntup -l -H || netstat -tunap';
+
+    exec(cmd, { encoding: 'utf8', maxBuffer: 1024 * 1024 * 10 }, async (err, stdout) => {
       if (err) { reject(err); return; }
 
-      const connections = parseNetstatWindows(stdout);
-      const pids = connections.map(c => c.pid);
-      const processMap = await getProcessNames(pids);
+      let connections = isWin 
+        ? parseNetstatWindows(stdout)
+        : parseLinuxSS(stdout);
 
-      for (const conn of connections) {
-        conn.processName = processMap[conn.pid] || 'N/A';
+      if (isWin) {
+        const pids = connections.map(c => c.pid);
+        const processMap = await getProcessNames(pids);
+        for (const conn of connections) {
+          conn.processName = processMap[conn.pid] || 'N/A';
+        }
       }
 
       const portMap = {};
@@ -171,8 +210,8 @@ function getPortInfo() {
         }
         portMap[key].connections++;
         portMap[key].states[conn.state] = (portMap[key].states[conn.state] || 0) + 1;
-        if (conn.processName !== 'N/A') portMap[key].processes.add(conn.processName);
-        if (conn.pid !== 'N/A') portMap[key].pids.add(conn.pid);
+        if (conn.processName && conn.processName !== 'N/A') portMap[key].processes.add(conn.processName);
+        if (conn.pid && conn.pid !== 'N/A') portMap[key].pids.add(conn.pid);
         portMap[key].localIPs.add(conn.localIP);
         if (conn.proto && !portMap[key].proto.includes(conn.proto)) {
           portMap[key].proto += '/' + conn.proto;
@@ -242,7 +281,7 @@ function parseLinuxSS(output) {
     if (lastColon === -1) continue;
 
     const localIP = local.substring(0, lastColon);
-    const localPort = parseInt(localAddress = local.substring(lastColon + 1));
+    const localPort = parseInt(local.substring(lastColon + 1));
 
     let remoteIP = '';
     let remotePort = '';
