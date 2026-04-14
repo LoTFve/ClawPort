@@ -35,6 +35,13 @@
 2. **全英文 Commit**：在生成 Git 提交信息（Commit Message）时，**必须全部使用英文**，并遵循常规规范（如 `feat: add new...`, `fix: resolve error in...`）。
 3. **保持注释完整性**：除非专门要求重构，否则严禁在修改时清理或删除与所分配任务无关的其他代码和注释。
 
+## 5. 🔄 工作流与代码提交约束
+
+1. **开发前状态同步**：在动工（编写代码或推导方案）之前，必须优先拉取（`git fetch`）远端的最新代码，确保我们的工作基于最新的源版本。
+2. **原子化提交 (Atomicity)**：
+   - 尽量保持**每个 Commit 是一个独立的小模块**或修改（避免将毫不相干的代码改动塞进同一个 Commit 中）。
+   - 确保**每个 PR 聚焦于一个独立的功能点**或 Bug 修复。
+
 ---
 > **📝 To AI System (Antigravity)**: 
 > You have successfully read the `Agents.md` rules. From now on, whenever working in this `port-monitor` codebase, enforce these best practices automatically.
