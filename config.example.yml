@@ -1,0 +1,22 @@
+# ClawPort Configuration
+# Copy this file to config.yml and fill in your values.
+
+dashboard:
+  port: 13457
+  ssh_polling_interval: 15000  # ms
+  default_refresh_ms: 10000    # ms for browser clients
+
+ssh_servers:
+  - id: "server-01"
+    name: "My Server"
+    host: "hostname-or-ip"
+    port: 22
+    username: "root"
+    privateKeyPath: "/path/to/key.pem"
+
+#  - id: "server-02"
+#    name: "Backup Server"
+#    host: "1.2.3.4"
+#    port: 22
+#    username: "ubuntu"
+#    privateKeyPath: "/path/to/key.pem"

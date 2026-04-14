@@ -598,7 +598,7 @@
     let filtered = connections;
     if (stateF !== 'all') filtered = filtered.filter(c => c.state === stateF);
     if (protoF !== 'all') filtered = filtered.filter(c => c.proto.includes(protoF));
-    if (search) filtered = filtered.filter(c => String(c.localPort).includes(search) || c.processName.toLowerCase().includes(search) || c.localIP.includes(search) || c.remoteIP.includes(search));
+    if (search) filtered = filtered.filter(c => String(c.localPort).includes(search) || c.processName.toLowerCase().includes(search) || c.localIP.includes(search) || c.remoteIP.includes(search) || (c.user || '').toLowerCase().includes(search));
 
     filtered.sort((a, b) => { let va = a[sortConfig.key], vb = b[sortConfig.key]; if (typeof va === 'number') return sortConfig.dir === 'asc' ? va - vb : vb - va; va = String(va); vb = String(vb); return sortConfig.dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va); });
 
@@ -606,9 +606,9 @@
     const limit = 50, display = filtered.slice(0, limit);
     const html = display.map(c => {
       const svc = getPortService(c.localPort), svcLabel = svc ? `<span class="table-svc-badge" title="${svc.name}">${svc.icon} ${svc.name}</span>` : '', procIcon = getProcessIcon(c.processName);
-      return `<tr><td>${c.proto}</td><td><strong>${c.localPort}</strong> ${svcLabel}</td><td>${c.localIP}</td><td>${c.remoteIP}${c.remotePort ? ':' + c.remotePort : ''}</td><td><span class="state-badge ${getStateBadgeClass(c.state)}">${c.state}</span></td><td>${c.pid}</td><td>${procIcon} ${truncate(c.processName, 18)}</td></tr>`;
+      return `<tr><td>${c.proto}</td><td><strong>${c.localPort}</strong> ${svcLabel}</td><td>${c.localIP}</td><td>${c.remoteIP}${c.remotePort ? ':' + c.remotePort : ''}</td><td><span class="state-badge ${getStateBadgeClass(c.state)}">${c.state}</span></td><td>${c.pid}</td><td>${c.user || 'N/A'}</td><td>${procIcon} ${truncate(c.processName, 18)}</td></tr>`;
     }).join('');
-    const moreHTML = filtered.length > limit ? `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:12px">显示前 ${limit} 条记录</td></tr>` : '';
+    const moreHTML = filtered.length > limit ? `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:12px">显示前 ${limit} 条记录</td></tr>` : '';
     updateHTML(elConnTableBody, html + moreHTML);
   }
 

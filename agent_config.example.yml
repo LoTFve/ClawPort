@@ -1,0 +1,8 @@
+# ClawPort Agent Configuration
+# Copy this file to agent_config.yml and fill in your values.
+
+master_url: "ws://dashboard-host:13457"  # Dashboard WebSocket address
+agent_id: ""                             # Leave empty to use hostname
+agent_name: ""                           # Leave empty to use hostname
+refresh_interval: 10000                  # Data collection interval (ms)
+reconnect_interval: 5000                 # Reconnect interval on disconnect (ms)

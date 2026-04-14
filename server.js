@@ -113,8 +113,9 @@ function parseNetstatWindows(output) {
     const proto = parts[0];
     const localAddress = parts[1];
     const foreignAddress = parts[2];
-    const state = parts[3] || '';
-    const pid = parts.length >= 5 ? parts[4] : '';
+    const isUDP = proto.toUpperCase().startsWith('UDP');
+    const state = isUDP ? '' : (parts[3] || '');
+    const pid = isUDP ? (parts[3] || '') : (parts.length >= 5 ? parts[4] : '');
 
     const lastColon = localAddress.lastIndexOf(':');
     if (lastColon === -1) continue;
@@ -313,9 +314,10 @@ function parseLinuxSS(output) {
       localPort,
       remoteIP,
       remotePort,
-      state: state === 'UNCONN' ? 'UDP' : state,
+      state: state === 'UNCONN' ? 'UDP' : normalizeState(state),
       pid,
-      processName
+      processName,
+      user: 'N/A'
     });
   }
   return connections;
@@ -363,14 +365,25 @@ async function collectSSHData(config) {
       // We run ss with -ntp (TCP), -nup (UDP), -l (Listening), -H (No header)
       // Usually requires sudo to see process names for all users
       // However, we'll try without first, or user can prefix with sudo if they want
-      const cmd = 'ss -ntup -l -H';
+      const cmd = 'ss -ntup -l -H; echo "---PS---"; ps -eo pid,user --no-headers 2>/dev/null || true';
       conn.exec(cmd, (err, stream) => {
         if (err) { conn.end(); reject(err); return; }
         let stdout = '';
         stream.on('data', (data) => { stdout += data; });
         stream.on('close', () => {
           conn.end();
-          const connections = parseLinuxSS(stdout);
+          const [ssPart, psPart] = stdout.split('---PS---');
+          const pidUserMap = {};
+          if (psPart) {
+            for (const line of psPart.trim().split('\n')) {
+              const m = line.trim().match(/^(\d+)\s+(\S+)/);
+              if (m) pidUserMap[m[1]] = m[2];
+            }
+          }
+          const connections = parseLinuxSS(ssPart || '');
+          for (const c of connections) {
+            c.user = (c.pid !== 'N/A' && pidUserMap[c.pid]) ? pidUserMap[c.pid] : 'N/A';
+          }
           const processed = processRawLinuxData(connections);
 
           resolve({
