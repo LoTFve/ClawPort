@@ -382,7 +382,7 @@
     const memTotal = (info.totalMem / 1073741824).toFixed(1);
     const hours = Math.floor(info.uptime / 3600);
     const minutes = Math.floor((info.uptime % 3600) / 60);
-
+    const load = info.loadAvg ? info.loadAvg.map(l => l.toFixed(2)).join(' / ') : 'N/A';
     const serverName = currentData?.serverName || info.hostname;
     updateText(elHostname, serverName);
 
@@ -390,6 +390,7 @@
       <div class="sys-row"><span class="label">主机名</span><span class="value">${info.hostname}</span></div>
       <div class="sys-row"><span class="label">系统</span><span class="value">${getPlatformIcon(info.platform)} ${info.platform} / ${info.arch}</span></div>
       <div class="sys-row"><span class="label">CPU 核心</span><span class="value">${info.cpus}</span></div>
+      <div class="sys-row"><span class="label">系统负载</span><span class="value">${load}</span></div>
       <div class="sys-row">
         <span class="label">内存使用</span>
         <span class="value">${memPercent}% / ${memTotal} GB

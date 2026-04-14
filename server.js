@@ -35,9 +35,9 @@ try {
 }
 
 const CONFIG = {
-  port: process.env.PORT || yamlConfig.dashboard?.port,
-  ssh_polling_interval: yamlConfig.dashboard?.ssh_polling_interval,
-  default_refresh_ms: yamlConfig.dashboard?.default_refresh_ms
+  port: process.env.PORT || yamlConfig.dashboard?.port || 3456,
+  ssh_polling_interval: yamlConfig.dashboard?.ssh_polling_interval || 10000,
+  default_refresh_ms: yamlConfig.dashboard?.default_refresh_ms || 5000
 };
 
 let SSH_SERVERS = yamlConfig.ssh_servers || [];
@@ -234,9 +234,14 @@ function getPortInfo() {
         freeMem: os.freemem(),
         uptime: os.uptime(),
         networkInterfaces: Object.entries(os.networkInterfaces()).reduce((acc, [name, infos]) => {
-          acc[name] = infos.filter(i => !i.internal).map(i => ({ address: i.address, family: i.family }));
+          acc[name] = infos.filter(i => !i.internal).map(i => ({ 
+            address: i.address, 
+            family: i.family,
+            mac: i.mac 
+          }));
           return acc;
-        }, {})
+        }, {}),
+        loadAvg: os.loadavg() // Added for local
       };
 
       resolve({
