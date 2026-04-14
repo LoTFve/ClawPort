@@ -1,6 +1,7 @@
 /**
  * Port Monitor Dashboard - Client-side Application
  * Multi-server support with Agent mode
+ * Optimized for smoothness and performance
  */
 (function () {
   'use strict';
@@ -14,6 +15,10 @@
   let reconnectTimer = null;
   let currentServerId = 'local';
   let serverList = [];
+  
+  // Node Cache for reconciliation
+  const portNodes = new Map(); // port -> element
+  const serverNodes = new Map(); // serverId -> element
 
   // ── DOM Elements ────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
@@ -79,6 +84,18 @@
 
   function getPlatformIcon(platform) {
     return platformIcons[platform] || '🖥️';
+  }
+
+  // ── Connection Type Icons ──────────────────────
+  const typeIcons = {
+    'ws': '🛰️',
+    'ssh': '🔑',
+    'local': '🏠'
+  };
+
+  function getConnectionTypeIcon(type, id) {
+    if (id === 'local') return typeIcons['local'];
+    return typeIcons[type] || '🖥️';
   }
 
   // ── Well-known Port Icons ─────────────────────
@@ -180,7 +197,7 @@
 
     ws.onopen = () => {
       elStatus.className = 'connection-status connected';
-      elStatus.querySelector('.status-text').textContent = '已连接';
+      updateText(elStatus.querySelector('.status-text'), '已连接');
       if (reconnectTimer) {
         clearInterval(reconnectTimer);
         reconnectTimer = null;
@@ -189,7 +206,7 @@
 
     ws.onclose = () => {
       elStatus.className = 'connection-status disconnected';
-      elStatus.querySelector('.status-text').textContent = '已断开';
+      updateText(elStatus.querySelector('.status-text'), '已断开');
       if (!reconnectTimer) {
         reconnectTimer = setInterval(connect, 5000);
       }
@@ -240,8 +257,12 @@
     selectedPort = null;
     elPortDetailSection.style.display = 'none';
 
+    // Clear caches for new server to force full render
+    portNodes.clear();
+    elPortGrid.innerHTML = '';
+
     // Update chip active state
-    elServerChips.querySelectorAll('.server-chip').forEach(chip => {
+    $$('.server-chip').forEach(chip => {
       chip.classList.toggle('active', chip.dataset.serverId === serverId);
     });
 
@@ -259,7 +280,7 @@
   }
 
   function showNoDataState(serverName) {
-    elHostname.textContent = serverName;
+    updateText(elHostname, serverName);
     elPortGrid.innerHTML = `
       <div class="loading-placeholder">
         <div class="spinner"></div>
@@ -269,33 +290,49 @@
 
   // ── Render Server Chips ─────────────────────────
   function renderServerChips() {
-    const html = serverList.map(s => {
-      const isActive = s.id === currentServerId;
-      const icon = getPlatformIcon(s.platform);
+    const activeIds = new Set(serverList.map(s => String(s.id)));
+    
+    // Remove old ones
+    serverNodes.forEach((el, id) => {
+      if (!activeIds.has(id)) {
+        el.remove();
+        serverNodes.delete(id);
+      }
+    });
+
+    serverList.forEach(s => {
+      const id = String(s.id);
+      const isActive = id === currentServerId;
       const statusClass = s.status === 'online' ? 'online' : 'offline';
+      
+      let el = serverNodes.get(id);
+      if (!el) {
+        el = document.createElement('button');
+        el.className = 'server-chip';
+        el.dataset.serverId = id;
+        el.innerHTML = `
+          <span class="server-chip-dot"></span>
+          <span class="server-chip-icon"></span>
+          <span class="server-chip-name"></span>
+        `;
+        el.addEventListener('click', () => switchServer(id));
+        elServerChips.appendChild(el);
+        serverNodes.set(id, el);
+      }
 
-      return `
-        <button class="server-chip ${isActive ? 'active' : ''}"
-                data-server-id="${s.id}"
-                title="${s.name} (${s.platform}/${s.arch})">
-          <span class="server-chip-dot ${statusClass}"></span>
-          <span class="server-chip-icon">${icon}</span>
-          <span class="server-chip-name">${s.name}</span>
-        </button>`;
-    }).join('');
-
-    elServerChips.innerHTML = html;
-
-    // Attach click handlers
-    elServerChips.querySelectorAll('.server-chip').forEach(chip => {
-      chip.addEventListener('click', () => {
-        switchServer(chip.dataset.serverId);
-      });
+      el.classList.toggle('active', isActive);
+      el.title = `${s.name} (${s.platform}/${s.arch})`;
+      
+      const dot = el.querySelector('.server-chip-dot');
+      dot.className = `server-chip-dot ${statusClass}`;
+      
+      updateText(el.querySelector('.server-chip-icon'), getConnectionTypeIcon(s.type, id));
+      updateText(el.querySelector('.server-chip-name'), s.name);
     });
 
     // Update count
     const onlineCount = serverList.filter(s => s.status === 'online').length;
-    elServerCount.textContent = `${onlineCount} / ${serverList.length} 在线`;
+    updateText(elServerCount, `${onlineCount} / ${serverList.length} 在线`);
   }
 
   // ── Render ──────────────────────────────────────
@@ -317,7 +354,7 @@
 
   function renderTimestamp(ts) {
     const d = new Date(ts);
-    elLastUpdate.textContent = d.toLocaleTimeString('zh-CN');
+    updateText(elLastUpdate, d.toLocaleTimeString('zh-CN'));
   }
 
   function renderStats(summary) {
@@ -328,12 +365,15 @@
   }
 
   function animateValue(el, value) {
-    const current = parseInt(el.textContent) || 0;
-    if (current === value) return;
-    el.textContent = value;
-    el.style.transform = 'scale(1.15)';
-    el.style.transition = 'transform 0.2s ease';
-    setTimeout(() => { el.style.transform = 'scale(1)'; }, 200);
+    const currentText = el.textContent || '0';
+    const targetValue = String(value);
+    
+    if (currentText === targetValue) return;
+    
+    el.textContent = targetValue;
+    el.classList.remove('animate-pop');
+    void el.offsetWidth; // trigger reflow
+    el.classList.add('animate-pop');
   }
 
   function renderSystemInfo(info) {
@@ -344,9 +384,9 @@
     const minutes = Math.floor((info.uptime % 3600) / 60);
 
     const serverName = currentData?.serverName || info.hostname;
-    elHostname.textContent = serverName;
+    updateText(elHostname, serverName);
 
-    elSysInfo.innerHTML = `
+    const html = `
       <div class="sys-row"><span class="label">主机名</span><span class="value">${info.hostname}</span></div>
       <div class="sys-row"><span class="label">系统</span><span class="value">${getPlatformIcon(info.platform)} ${info.platform} / ${info.arch}</span></div>
       <div class="sys-row"><span class="label">CPU 核心</span><span class="value">${info.cpus}</span></div>
@@ -358,9 +398,10 @@
       </div>
       <div class="sys-row"><span class="label">运行时间</span><span class="value">${hours}h ${minutes}m</span></div>
     `;
+    updateHTML(elSysInfo, html);
   }
 
-  // ── Port Grid ───────────────────────────────────
+  // ── Port Grid Reconciliation ────────────────────
   function renderPortGrid(ports) {
     const search = elSearchInput.value.toLowerCase().trim();
     let filtered = ports;
@@ -373,54 +414,90 @@
     }
 
     if (filtered.length === 0) {
-      elPortGrid.innerHTML = `
-        <div class="loading-placeholder">
-          <p>未找到匹配的端口</p>
-        </div>`;
+      updateHTML(elPortGrid, '<div class="loading-placeholder"><p>未找到匹配的端口</p></div>');
+      portNodes.clear();
       return;
     }
 
-    const html = filtered.map(p => {
+    // Remove old loading placeholder if exists
+    const placeholder = elPortGrid.querySelector('.loading-placeholder');
+    if (placeholder) elPortGrid.removeChild(placeholder);
+
+    const activePorts = new Set(filtered.map(p => p.port));
+    
+    // Remove nodes that are no longer present
+    portNodes.forEach((el, port) => {
+      if (!activePorts.has(port)) {
+        el.remove();
+        portNodes.delete(port);
+      }
+    });
+
+    const fragment = document.createDocumentFragment();
+    let hasNew = false;
+
+    filtered.forEach(p => {
+      const port = p.port;
       const mainState = getMainState(p.states);
       const stateClass = getPortStateClass(p.states);
       const process = p.processes[0] || '';
-
-      // Build state bar
+      const service = getPortService(port);
+      const procIcon = getProcessIcon(process);
+      const serviceName = service ? service.name : '';
       const total = Object.values(p.states).reduce((s, v) => s + v, 0);
+      
+      let el = portNodes.get(port);
+      const isNew = !el;
+
+      if (isNew) {
+        el = document.createElement('div');
+        el.className = 'port-cell';
+        el.dataset.port = port;
+        el.innerHTML = `
+          <span class="port-service-icon"></span>
+          <span class="port-number">${port}</span>
+          <span class="port-label"></span>
+          <span class="port-conns"></span>
+          <div class="port-state-bar"></div>
+        `;
+        el.addEventListener('click', () => selectPort(port));
+        fragment.appendChild(el);
+        portNodes.set(port, el);
+        hasNew = true;
+        el.classList.add('newly-added');
+      }
+
+      // Update attributes and content incrementally
+      const currentClassList = `port-cell ${stateClass} ${selectedPort === port ? 'selected' : ''}`;
+      if (el.className !== currentClassList) {
+        if (!isNew && !el.className.includes(stateClass)) {
+          el.classList.add('status-changed');
+          setTimeout(() => el.classList.remove('status-changed'), 1500);
+        }
+        el.className = currentClassList;
+      }
+
+      el.title = `Port ${port} - ${service ? service.name : process || 'Unknown'}`;
+      
+      const iconWrap = el.querySelector('.port-service-icon');
+      const iconHTML = service ? service.icon : procIcon;
+      updateText(iconWrap, iconHTML);
+
+      updateText(el.querySelector('.port-label'), serviceName || truncate(process, 12));
+      updateText(el.querySelector('.port-conns'), String(p.connections));
+
       const barSegments = Object.entries(p.states)
         .sort((a, b) => b[1] - a[1])
         .map(([state, count]) => {
           const w = Math.max((count / total) * 100, 5);
           return `<span class="bar-segment" style="width:${w}%;background:${getStateColor(state)}"></span>`;
         }).join('');
-
-      const service = getPortService(p.port);
-      const procIcon = getProcessIcon(process);
-      const serviceTag = service
-        ? `<span class="port-service-icon" title="${service.name}">${service.icon}</span>`
-        : `<span class="port-service-icon">${procIcon}</span>`;
-      const serviceName = service ? service.name : '';
-
-      return `
-        <div class="port-cell ${stateClass} ${selectedPort === p.port ? 'selected' : ''}"
-             data-port="${p.port}" title="Port ${p.port} - ${service ? service.name : process || 'Unknown'}">
-          ${serviceTag}
-          <span class="port-number">${p.port}</span>
-          <span class="port-label">${serviceName || truncate(process, 12)}</span>
-          <span class="port-conns">${p.connections}</span>
-          <div class="port-state-bar">${barSegments}</div>
-        </div>`;
-    }).join('');
-
-    elPortGrid.innerHTML = html;
-
-    // Attach click handlers
-    elPortGrid.querySelectorAll('.port-cell').forEach(cell => {
-      cell.addEventListener('click', () => {
-        const port = parseInt(cell.dataset.port);
-        selectPort(port);
-      });
+      updateHTML(el.querySelector('.port-state-bar'), barSegments);
     });
+
+    if (hasNew) {
+      elPortGrid.appendChild(fragment);
+    }
   }
 
   function getMainState(states) {
@@ -439,10 +516,8 @@
 
   function selectPort(port) {
     selectedPort = selectedPort === port ? null : port;
-
-    // Highlight
-    elPortGrid.querySelectorAll('.port-cell').forEach(c => {
-      c.classList.toggle('selected', parseInt(c.dataset.port) === selectedPort);
+    portNodes.forEach((el, p) => {
+      el.classList.toggle('selected', p === selectedPort);
     });
 
     if (selectedPort && currentData) {
@@ -455,14 +530,12 @@
   }
 
   function renderPortDetail(portData, connections) {
-    elPortDetailBadge.textContent = `:${portData.port}`;
-
-    const conns = connections.filter(c => c.localPort === portData.port);
+    updateText(elPortDetailBadge, `:${portData.port}`);
     const stateEntries = Object.entries(portData.states)
       .map(([s, c]) => `<div class="detail-row"><span class="label">${s}</span><span class="value">${c}</span></div>`)
       .join('');
 
-    elPortDetailContent.innerHTML = `
+    const html = `
       <div class="detail-row"><span class="label">协议</span><span class="value">${portData.proto}</span></div>
       <div class="detail-row"><span class="label">连接数</span><span class="value">${portData.connections}</span></div>
       <div class="detail-row"><span class="label">进程</span><span class="value">${portData.processes.join(', ') || 'N/A'}</span></div>
@@ -471,241 +544,87 @@
       <hr style="border:none;border-top:1px solid var(--border);margin:6px 0">
       ${stateEntries}
     `;
+    updateHTML(elPortDetailContent, html);
   }
 
-  // ── State Distribution Chart (SVG Donut) ──────
   function renderStateChart(connections) {
     const stateCounts = {};
-    connections.forEach(c => {
-      stateCounts[c.state] = (stateCounts[c.state] || 0) + 1;
-    });
-
+    connections.forEach(c => { stateCounts[c.state] = (stateCounts[c.state] || 0) + 1; });
     const entries = Object.entries(stateCounts).sort((a, b) => b[1] - a[1]);
     const total = connections.length;
 
     if (total === 0) {
-      elStateChart.innerHTML = '<p style="color:var(--text-muted);font-size:0.8rem">暂无数据</p>';
+      updateHTML(elStateChart, '<p style="color:var(--text-muted);font-size:0.8rem">暂无数据</p>');
       return;
     }
 
-    // Build SVG donut
-    const size = 120;
-    const cx = size / 2, cy = size / 2;
-    const r = 46, strokeWidth = 14;
+    const size = 120, cx = size / 2, cy = size / 2, r = 46, strokeWidth = 14;
     const circumference = 2 * Math.PI * r;
-
     let offset = 0;
     const arcs = entries.map(([state, count]) => {
-      const pct = count / total;
-      const dashLength = circumference * pct;
-      const dashOffset = circumference * offset;
+      const pct = count / total, dashLength = circumference * pct, dashOffset = circumference * offset;
       offset += pct;
-
-      return `<circle cx="${cx}" cy="${cy}" r="${r}"
-        fill="none" stroke="${getStateColor(state)}" stroke-width="${strokeWidth}"
-        stroke-dasharray="${dashLength} ${circumference - dashLength}"
-        stroke-dashoffset="-${dashOffset}"
-        style="transition: stroke-dasharray 0.5s ease, stroke-dashoffset 0.5s ease"/>`;
+      return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${getStateColor(state)}" stroke-width="${strokeWidth}" stroke-dasharray="${dashLength} ${circumference - dashLength}" stroke-dashoffset="-${dashOffset}" style="transition:all 0.5s ease"/>`;
     }).join('');
 
-    const svgDonut = `
-      <svg class="donut-chart" viewBox="0 0 ${size} ${size}">
-        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--bg-surface)" stroke-width="${strokeWidth}"/>
-        ${arcs}
-        <text x="${cx}" y="${cy - 4}" text-anchor="middle" fill="var(--text-primary)" font-size="16" font-weight="700" font-family="var(--font-mono)">${total}</text>
-        <text x="${cx}" y="${cy + 12}" text-anchor="middle" fill="var(--text-muted)" font-size="8" font-family="var(--font-sans)">总连接</text>
-      </svg>`;
-
-    const legend = entries.slice(0, 6).map(([state, count]) => `
-      <div class="legend-row">
-        <span class="dot" style="background:${getStateColor(state)}"></span>
-        <span class="name">${state}</span>
-        <span class="value">${count}</span>
-      </div>
-    `).join('');
-
-    elStateChart.innerHTML = `${svgDonut}<div class="chart-legend">${legend}</div>`;
+    const svgDonut = `<svg class="donut-chart" viewBox="0 0 ${size} ${size}"><circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--bg-surface)" stroke-width="${strokeWidth}"/>${arcs}<text x="${cx}" y="${cy - 4}" text-anchor="middle" fill="var(--text-primary)" font-size="16" font-weight="700">${total}</text><text x="${cx}" y="${cy + 12}" text-anchor="middle" fill="var(--text-muted)" font-size="8">总连接</text></svg>`;
+    const legend = entries.slice(0, 6).map(([state, count]) => `<div class="legend-row"><span class="dot" style="background:${getStateColor(state)}"></span><span class="name">${state}</span><span class="value">${count}</span></div>`).join('');
+    updateHTML(elStateChart, `${svgDonut}<div class="chart-legend">${legend}</div>`);
   }
 
-  // ── Protocol Bars ─────────────────────────────
   function renderProtoBars(connections) {
     const protoCounts = {};
-    connections.forEach(c => {
-      const proto = c.proto.split('/')[0];
-      protoCounts[proto] = (protoCounts[proto] || 0) + 1;
-    });
+    connections.forEach(c => { const proto = c.proto.split('/')[0]; protoCounts[proto] = (protoCounts[proto] || 0) + 1; });
+    const total = connections.length || 1, entries = Object.entries(protoCounts).sort((a, b) => b[1] - a[1]);
 
-    const total = connections.length || 1;
-    const entries = Object.entries(protoCounts).sort((a, b) => b[1] - a[1]);
-
-    elProtoBars.innerHTML = entries.map(([proto, count]) => {
+    const html = entries.map(([proto, count]) => {
       const pct = (count / total * 100).toFixed(1);
-      return `
-        <div class="proto-bar-item">
-          <span class="proto-name">${proto}</span>
-          <div class="proto-bar-track">
-            <div class="proto-bar-fill ${proto.toLowerCase()}" style="width: ${pct}%"></div>
-          </div>
-          <span class="proto-count">${count}</span>
-        </div>`;
+      return `<div class="proto-bar-item"><span class="proto-name">${proto}</span><div class="proto-bar-track"><div class="proto-bar-fill ${proto.toLowerCase()}" style="width: ${pct}%"></div></div><span class="proto-count">${count}</span></div>`;
     }).join('');
+    updateHTML(elProtoBars, html);
   }
 
-  // ── Top Processes ─────────────────────────────
   function renderProcessList(ports) {
     const processMap = {};
-    ports.forEach(p => {
-      p.processes.forEach(proc => {
-        if (!processMap[proc]) processMap[proc] = { ports: new Set(), conns: 0 };
-        processMap[proc].ports.add(p.port);
-        processMap[proc].conns += p.connections;
-      });
-    });
-
-    const sorted = Object.entries(processMap)
-      .sort((a, b) => b[1].conns - a[1].conns)
-      .slice(0, 10);
-
-    elProcessList.innerHTML = sorted.map(([name, data], i) => `
-      <div class="process-item">
-        <span class="process-icon">${getProcessIcon(name)}</span>
-        <span class="process-rank">${i + 1}</span>
-        <span class="process-name" title="${name}">${name}</span>
-        <span class="process-port-count">${data.ports.size} 端口</span>
-      </div>
-    `).join('') || '<p style="color:var(--text-muted);font-size:0.78rem">暂无数据</p>';
+    ports.forEach(p => { p.processes.forEach(proc => { if (!processMap[proc]) processMap[proc] = { ports: new Set(), conns: 0 }; processMap[proc].ports.add(p.port); processMap[proc].conns += p.connections; }); });
+    const sorted = Object.entries(processMap).sort((a, b) => b[1].conns - a[1].conns).slice(0, 10);
+    const html = sorted.map(([name, data], i) => `<div class="process-item"><span class="process-icon">${getProcessIcon(name)}</span><span class="process-rank">${i + 1}</span><span class="process-name" title="${name}">${name}</span><span class="process-port-count">${data.ports.size} 端口</span></div>`).join('') || '<p style="color:var(--text-muted);font-size:0.78rem">暂无数据</p>';
+    updateHTML(elProcessList, html);
   }
 
-  // ── Connection Table ──────────────────────────
   function renderConnectionTable(connections) {
-    const stateF = elStateFilter.value;
-    const protoF = elProtoFilter.value;
-    const search = elSearchInput.value.toLowerCase().trim();
-
+    const stateF = elStateFilter.value, protoF = elProtoFilter.value, search = elSearchInput.value.toLowerCase().trim();
     let filtered = connections;
+    if (stateF !== 'all') filtered = filtered.filter(c => c.state === stateF);
+    if (protoF !== 'all') filtered = filtered.filter(c => c.proto.includes(protoF));
+    if (search) filtered = filtered.filter(c => String(c.localPort).includes(search) || c.processName.toLowerCase().includes(search) || c.localIP.includes(search) || c.remoteIP.includes(search));
 
-    if (stateF !== 'all') {
-      filtered = filtered.filter(c => c.state === stateF);
-    }
-    if (protoF !== 'all') {
-      filtered = filtered.filter(c => c.proto.includes(protoF));
-    }
-    if (search) {
-      filtered = filtered.filter(c =>
-        String(c.localPort).includes(search) ||
-        c.processName.toLowerCase().includes(search) ||
-        c.localIP.includes(search) ||
-        c.remoteIP.includes(search)
-      );
-    }
+    filtered.sort((a, b) => { let va = a[sortConfig.key], vb = b[sortConfig.key]; if (typeof va === 'number') return sortConfig.dir === 'asc' ? va - vb : vb - va; va = String(va); vb = String(vb); return sortConfig.dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va); });
 
-    // Sort
-    filtered.sort((a, b) => {
-      let va = a[sortConfig.key];
-      let vb = b[sortConfig.key];
-      if (typeof va === 'number') return sortConfig.dir === 'asc' ? va - vb : vb - va;
-      va = String(va); vb = String(vb);
-      return sortConfig.dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
-    });
-
-    elConnCount.textContent = filtered.length;
-
-    // Limit rendering for performance
-    const limit = 200;
-    const display = filtered.slice(0, limit);
-
-    elConnTableBody.innerHTML = display.map(c => {
-      const svc = getPortService(c.localPort);
-      const svcLabel = svc ? `<span class="table-svc-badge" title="${svc.name}">${svc.icon} ${svc.name}</span>` : '';
-      const procIcon = getProcessIcon(c.processName);
-      return `
-      <tr>
-        <td>${c.proto}</td>
-        <td><strong>${c.localPort}</strong> ${svcLabel}</td>
-        <td>${c.localIP}</td>
-        <td>${c.remoteIP}${c.remotePort ? ':' + c.remotePort : ''}</td>
-        <td><span class="state-badge ${getStateBadgeClass(c.state)}">${c.state}</span></td>
-        <td>${c.pid}</td>
-        <td>${procIcon} ${truncate(c.processName, 18)}</td>
-      </tr>`;
+    updateText(elConnCount, String(filtered.length));
+    const limit = 50, display = filtered.slice(0, limit);
+    const html = display.map(c => {
+      const svc = getPortService(c.localPort), svcLabel = svc ? `<span class="table-svc-badge" title="${svc.name}">${svc.icon} ${svc.name}</span>` : '', procIcon = getProcessIcon(c.processName);
+      return `<tr><td>${c.proto}</td><td><strong>${c.localPort}</strong> ${svcLabel}</td><td>${c.localIP}</td><td>${c.remoteIP}${c.remotePort ? ':' + c.remotePort : ''}</td><td><span class="state-badge ${getStateBadgeClass(c.state)}">${c.state}</span></td><td>${c.pid}</td><td>${procIcon} ${truncate(c.processName, 18)}</td></tr>`;
     }).join('');
-
-    if (filtered.length > limit) {
-      elConnTableBody.innerHTML += `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:12px">
-        还有 ${filtered.length - limit} 条记录未显示
-      </td></tr>`;
-    }
+    const moreHTML = filtered.length > limit ? `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:12px">显示前 ${limit} 条记录</td></tr>` : '';
+    updateHTML(elConnTableBody, html + moreHTML);
   }
 
-  // ── Utilities ─────────────────────────────────
-  function truncate(str, len) {
-    if (!str) return '';
-    return str.length > len ? str.substring(0, len) + '…' : str;
-  }
+  function updateText(el, text) { if (el && el.textContent !== text) el.textContent = text; }
+  function updateHTML(el, html) { if (el && el.innerHTML !== html) el.innerHTML = html; }
+  function truncate(str, len) { if (!str) return ''; return str.length > len ? str.substring(0, len) + '…' : str; }
 
   // ── Event Listeners ───────────────────────────
-  // Theme toggle
   let isDark = true;
-  $('#btnToggleTheme').addEventListener('click', () => {
-    isDark = !isDark;
-    document.documentElement.setAttribute('data-theme', isDark ? '' : 'light');
-  });
+  $('#btnToggleTheme').addEventListener('click', () => { isDark = !isDark; document.documentElement.setAttribute('data-theme', isDark ? '' : 'light'); });
+  $('#btnRefresh').addEventListener('click', () => { if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); setTimeout(connect, 100); } });
+  $('#refreshInterval').addEventListener('change', (e) => { const interval = parseInt(e.target.value); if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ interval })); });
+  $('#viewToggle').addEventListener('click', (e) => { const btn = e.target.closest('.view-btn'); if (!btn) return; currentView = btn.dataset.view; $$('.view-btn').forEach(b => b.classList.toggle('active', b === btn)); elPortGrid.classList.toggle('list-view', currentView === 'list'); });
+  elSearchInput.addEventListener('input', () => { if (currentData) { renderPortGrid(currentData.ports); renderConnectionTable(currentData.connections); } });
+  elStateFilter.addEventListener('change', () => { if (currentData) renderConnectionTable(currentData.connections); });
+  elProtoFilter.addEventListener('change', () => { if (currentData) renderConnectionTable(currentData.connections); });
+  $$('.conn-table th.sortable').forEach(th => { th.addEventListener('click', () => { const key = th.dataset.sort; if (sortConfig.key === key) sortConfig.dir = sortConfig.dir === 'asc' ? 'desc' : 'asc'; else { sortConfig.key = key; sortConfig.dir = 'asc'; } if (currentData) renderConnectionTable(currentData.connections); }); });
 
-  // Refresh
-  $('#btnRefresh').addEventListener('click', () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close();
-      setTimeout(connect, 100);
-    }
-  });
-
-  // Refresh interval
-  $('#refreshInterval').addEventListener('change', (e) => {
-    const interval = parseInt(e.target.value);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ interval }));
-    }
-  });
-
-  // View toggle
-  $('#viewToggle').addEventListener('click', (e) => {
-    const btn = e.target.closest('.view-btn');
-    if (!btn) return;
-    currentView = btn.dataset.view;
-    $$('.view-btn').forEach(b => b.classList.toggle('active', b === btn));
-    elPortGrid.classList.toggle('list-view', currentView === 'list');
-  });
-
-  // Search
-  elSearchInput.addEventListener('input', () => {
-    if (currentData) {
-      renderPortGrid(currentData.ports);
-      renderConnectionTable(currentData.connections);
-    }
-  });
-
-  // Filters
-  elStateFilter.addEventListener('change', () => {
-    if (currentData) renderConnectionTable(currentData.connections);
-  });
-  elProtoFilter.addEventListener('change', () => {
-    if (currentData) renderConnectionTable(currentData.connections);
-  });
-
-  // Table sorting
-  $$('.conn-table th.sortable').forEach(th => {
-    th.addEventListener('click', () => {
-      const key = th.dataset.sort;
-      if (sortConfig.key === key) {
-        sortConfig.dir = sortConfig.dir === 'asc' ? 'desc' : 'asc';
-      } else {
-        sortConfig.key = key;
-        sortConfig.dir = 'asc';
-      }
-      if (currentData) renderConnectionTable(currentData.connections);
-    });
-  });
-
-  // ── Initialize ────────────────────────────────
   connect();
 })();
